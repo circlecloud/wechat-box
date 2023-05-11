@@ -15,10 +15,16 @@ function errmonitor() {
         do
             NAME=`xdotool getwindowname $i`
             echo "window name: $NAME"
-            if [ "$NAME" == "程序错误" ]; then
+            if [ "$NAME" == "程序错误" ] || [ "$NAME" == "Wine Debugger" ]; then
                 xdotool windowkill $i
             fi
         done
+        netstat -ntl | grep 19088
+        INJECT=$?
+        if [ "$INJECT" != "0" ]; then
+            wechat-inject
+            sleep 5
+        fi
         sleep 1
     done
 }

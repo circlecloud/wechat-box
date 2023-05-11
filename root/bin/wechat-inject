@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+wine /ConsoleInject.exe -i WeChat.exe -p 'Z:\WeChatInject.dll'

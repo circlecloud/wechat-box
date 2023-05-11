@@ -3,10 +3,35 @@
 function install() {
     while :
     do
+        xdotool search 'Mono'
+        CHECK_MONO=$?
+        if [ "$CHECK_MONO" == "0" ]; then
+            xdotool key Return
+        fi
+        xdotool search 'unpack'
+        NOTFOUND=$?
+        if [ "$NOTFOUND" == "0" ]; then
+            break;
+        fi
+        sleep 0.5
+    done
+    echo "安装包开始解压..."
+    while :
+    do
+        xdotool search 'unpack'
+        NOTFOUND=$?
+        if [ "$NOTFOUND" != "0" ]; then
+            break;
+        fi
+        sleep 0.5
+    done
+    echo "安装包解压完成 开始安装..."
+    while :
+    do
         xdotool search '微信安装向导'
         NOTFOUND=$?
         if [ "$NOTFOUND" == "0" ]; then
-            sleep 20
+            sleep 1
             xdotool key Tab
             sleep 0.5
             xdotool key Tab
@@ -40,7 +65,7 @@ function install() {
     done
 }
 
-wine /WeChatSetup-v3.6.0.18.exe &
+wine /WeChatSetup.exe &
 install
 wait
 sleep 15
