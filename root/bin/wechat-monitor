@@ -1,31 +1,193 @@
 #!/usr/bin/env bash
 
-function errmonitor() {
-    while :
-    do
-        for i in `xdotool search --onlyvisible --class WeChat.exe`
-        do
-            NAME=`xdotool getwindowname $i`
-            echo "window name: $NAME"
-            if [ "$NAME" == "" ] || [ "$NAME" == "微信电脑版更新" ]; then
-                xdotool windowunmap $i
+update_status() {
+    curl -s -o /dev/null "${REPORT_URL}/status/${1}"
+}
+
+running_status() {
+    curl -s -o /dev/null "${RUNNING_URL}/status/${1}"
+}
+
+WECHAT_INJECT_URL="http://127.0.0.1:19088/api/"
+WECHAT_FORWARD_URL="http://127.0.0.1:9080/get_login_info"
+
+WECHAT_STATUS=-1
+WECHAT_ERROR_COUNT=0
+WECHAT_IS_LOGIN=0
+WECHAT_IS_CONFIG=0
+
+function clear_wechat() {
+    PID="$(netstat -ntpl 2>&1 | awk '$4 ~ /:19088$/ {split($NF,a,"/"); print a[1]}')"
+    if [ "${PID}" != "" ]; then
+        sudo kill ${PID}
+    fi
+    sleep 1
+    sudo killall TxBugReport.exe
+    sudo kill $(pgrep WeChat.exe)
+    sudo killall wechat-forward
+    WECHAT_IS_CONFIG=0
+    WECHAT_IS_LOGIN=0
+    sleep 3
+}
+
+function monitor() {
+    while true; do
+        if [ "$(pgrep WeChat.exe)" == "" ]; then
+            if [ ${WECHAT_STATUS} -ne 0 ]; then
+                WECHAT_STATUS=0
+                echo "等待微信运行..."
             fi
-        done
-        for i in `xdotool search --onlyvisible --class wine`
-        do
-            NAME=`xdotool getwindowname $i`
-            echo "window name: $NAME"
-            if [ "$NAME" == "程序错误" ] || [ "$NAME" == "Wine Debugger" ]; then
-                xdotool windowkill $i
+            sleep 1
+            continue
+        fi
+        if [ ${WECHAT_STATUS} -ne 1 ]; then
+            WECHAT_STATUS=1
+            echo "微信运行中..."
+        fi
+        update_status running
+        if [ "$(netstat -ntpl 2>&1 | grep 19088)" == "" ]; then
+            WECHAT_IS_CONFIG=0
+            echo "未找到注入程序端口..."
+            let WECHAT_ERROR_COUNT++
+            if [[ ${WECHAT_ERROR_COUNT} -ge 5 ]]; then
+                WECHAT_ERROR_COUNT=0
+                echo "多次注入失败 尝试清理微信进程..."
+                clear_wechat
+                continue
             fi
-        done
-        netstat -ntl | grep 19088
-        INJECT=$?
-        if [ "$INJECT" != "0" ]; then
+            echo "尝试注入微信..."
             wechat-inject
             sleep 5
+            if [ "$(netstat -ntpl 2>&1 | grep 19088)" != "" ]; then
+                if [ "$(curl -m 5 -s -d '{}' ${WECHAT_FORWARD_URL} | grep error)" == "" ]; then
+                    echo "重启转发程序..."
+                    sudo killall wechat-forward
+                fi
+                echo "注入微信成功 监听端口: 19088"
+                if [ "$(curl -m 10 -s -w %{http_code} -d '{}' ${WECHAT_INJECT_URL}?type=0 -o /dev/null)" == "000" ]; then
+                    echo "注入端口调用失败 可能无法正常使用..."
+                fi
+            fi
+        elif [ "$(curl -m 5 -s -d '{}' ${WECHAT_FORWARD_URL} | grep error)" != "" ]; then
+            echo "微信未登录 尝试自动登录..."
+            xdotool mousemove 400 400
+            sleep 0.5
+            xdotool mousedown 1
+            sleep 0.5
+            xdotool mouseup 1
+            sleep 0.5
+            if [ "$(curl -m 5 -s -d '{}' ${WECHAT_FORWARD_URL} | grep error)" == "" ]; then
+                xdotool mouseup 1
+                continue
+            fi
+            sleep 5
+            xdotool mousemove 400 330
+            sleep 0.5
+            xdotool mousedown 1
+            sleep 0.5
+            xdotool mouseup 1
+            sleep 2
+        else
+            if [ ${WECHAT_IS_LOGIN} -ne 1 ]; then
+                WECHAT_IS_LOGIN=1
+                echo "微信登录成功 开始配置消息回调通知..."
+                WECHAT_IS_CONFIG=0
+                WECHAT_ERROR_COUNT=0
+            fi
+            if [ ${WECHAT_IS_CONFIG} -ne 1 ]; then
+                let WECHAT_ERROR_COUNT++
+                if [[ ${WECHAT_ERROR_COUNT} -ge 5 ]]; then
+                    WECHAT_ERROR_COUNT=0
+                    echo "多次配置回调失败 尝试清理微信进程..."
+                    clear_wechat
+                    continue
+                fi
+                echo "等待微信初始化完成..."
+                if [ "$(curl -m 30 -s -w %{http_code} -d '{}' ${WECHAT_INJECT_URL}?type=0 -o /dev/null)" == "000" ]; then
+                    echo "微信状态检测异常 尝试重新配置..."
+                    continue
+                fi
+                sleep 10
+                # if [ "$(curl -m 30 -s -w %{http_code} -d '{"keyword": "weixin"}' ${WECHAT_INJECT_URL}?type=19 -o /dev/null)" == "000" ]; then
+                #     echo "等待初始化超时 尝试重新配置..."
+                #     continue
+                # fi
+                if [ "$(curl -m 2 -s -w %{http_code} -d '{"ip": "127.0.0.1", "port": "3000", "enableHttp": "0"}' ${WECHAT_INJECT_URL}?type=9 -o /tmp/wechat-inject-result)" == "200" ]; then 
+                    cat /tmp/wechat-inject-result
+                    echo "回调地址配置成功..."
+                    WECHAT_IS_CONFIG=1
+                    WECHAT_ERROR_COUNT=0
+                else
+                    echo "回调地址配置失败 尝试重新配置..."
+                fi
+                echo "微信初始化已完成 进入值守状态..."
+            elif [ "$(curl -m 10 -s -w %{http_code} -d '{}' ${WECHAT_INJECT_URL}?type=0 -o /dev/null)" == "000" ]; then
+                echo "微信初始化完成 注入程序调用失败 进行二次检测..."
+                if [ "$(curl -m 20 -s -w %{http_code} -d '{}' ${WECHAT_INJECT_URL}?type=0 -o /dev/null)" == "000" ]; then
+                    echo "注入程序检测异常 清理微信进程..."
+                    clear_wechat
+                    continue
+                fi
+            fi
+            if [ "$(curl -m 2 -s -w %{http_code} -d '{}' ${WECHAT_INJECT_URL}?type=0 -o /dev/null)" != "000" ]; then
+                sleep 1
+                if [ "$(curl -m 2 -s -w %{http_code} https://ip.3322.org -o /dev/null)" == "000" ]; then
+                    echo "疑似网络异常 忽略状态检测..."
+                    continue
+                fi
+                # if [ "$(curl -m 20 -s -w %{http_code} -d '{"keyword": "weixin"}' ${WECHAT_INJECT_URL}?type=19 -o /dev/null)" == "000" ]; then
+                #     echo "微信已登录 注入程序正常 无法查询好友 尝试重新查询..."
+                #     let WECHAT_ERROR_COUNT++
+                #     if [[ ${WECHAT_ERROR_COUNT} -ge 5 ]]; then
+                #         WECHAT_ERROR_COUNT=0
+                #         echo "微信已登录 注入程序正常 多次无法查询好友 尝试清理微信进程..."
+                #         clear_wechat
+                #     fi
+                #     continue
+                # fi
+            fi
+            for i in $(seq 1 120); do
+                if [ "$(pgrep -f wechat-start)" == "" ] || [ "$(netstat -ntpl 2>&1 | grep 19088)" == "" ]; then
+                    break
+                fi
+                sleep 1
+            done
+            running_status
         fi
-        sleep 1
-    done
+   done
 }
+
+ERROR_CLOSE_COUNT=0
+
+function errmonitor() {
+    while true; do
+        if [ "$(pgrep TxBugReport.exe)" != "" ]; then
+            sudo killall TxBugReport.exe
+            sudo kill $(pgrep WeChat.exe)
+        fi
+        for i in $(xdotool search --onlyvisible --class WeChat.exe); do
+            NAME=$(xdotool getwindowname $i)
+            if [ "$NAME" == "" ] || [ "$NAME" == "微信电脑版更新" ]; then
+                xdotool windowunmap $i >/dev/null 2>&1
+            fi
+        done
+        for i in $(xdotool search --onlyvisible --class wine); do
+            NAME=$(xdotool getwindowname $i)
+            if [ "$NAME" == "程序错误" ] || [ "$NAME" == "错误报告" ] || [ "$NAME" == "Wine Debugger" ]; then
+                let WECHAT_ERROR_COUNT++
+                xdotool windowkill $i >/dev/null 2>&1
+            fi
+        done
+        if [[ ${WECHAT_ERROR_COUNT} -ge 1 ]]; then
+            sleep 10
+        else
+            sleep 1
+        fi
+   done
+}
+
+update_status starting
+
+sleep 5
+monitor &
 errmonitor 
